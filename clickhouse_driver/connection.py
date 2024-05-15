@@ -20,7 +20,7 @@ from .log import log_block
 from .progress import Progress
 from .protocol import Compression, ClientPacketTypes, ServerPacketTypes
 from .queryprocessingstage import QueryProcessingStage
-from .reader import read_binary_str
+from .reader import read_binary_str, read_binary_uint64
 from .readhelpers import read_exception
 from .settings.writer import write_settings, SettingsFlags
 from .streams.native import BlockInputStream, BlockOutputStream
@@ -314,7 +314,7 @@ class Connection(object):
             context.set_ciphers(ssl_options['ciphers'])
 
         if 'cert_reqs' in ssl_options:
-            context.options = ssl_options['cert_reqs']
+            context.verify_mode = ssl_options['cert_reqs']
 
         if 'certfile' in ssl_options:
             keyfile = ssl_options.get('keyfile')
@@ -496,6 +496,17 @@ class Connection(object):
             if used_revision >= \
                     defines.DBMS_MIN_REVISION_WITH_VERSION_PATCH:
                 server_version_patch = read_varint(self.fin)
+
+            if used_revision >= defines. \
+                    DBMS_MIN_PROTOCOL_VERSION_WITH_PASSWORD_COMPLEXITY_RULES:
+                rules_size = read_varint(self.fin)
+                for _i in range(rules_size):
+                    read_binary_str(self.fin)  # original_pattern
+                    read_binary_str(self.fin)  # exception_message
+
+            if used_revision >= defines. \
+                    DBMS_MIN_REVISION_WITH_INTERSERVER_SECRET_V2:
+                read_binary_uint64(self.fin)  # read_nonce
 
             self.server_info = ServerInfo(
                 server_name, server_version_major, server_version_minor,
@@ -703,10 +714,13 @@ class Connection(object):
         write_binary_str(query, self.fout)
 
         if revision >= defines.DBMS_MIN_PROTOCOL_VERSION_WITH_PARAMETERS:
-            # Always settings_as_strings = True
-            escaped = escape_params(
-                params or {}, self.context, for_server=True
-            )
+            if self.context.client_settings['server_side_params']:
+                # Always settings_as_strings = True
+                escaped = escape_params(
+                    params or {}, self.context, for_server=True
+                )
+            else:
+                escaped = {}
             write_settings(escaped, self.fout, True, SettingsFlags.CUSTOM)
 
         logger.debug('Query: %s', query)

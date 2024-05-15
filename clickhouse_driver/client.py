@@ -63,6 +63,11 @@ class Client(object):
                            tuple set ``namedtuple_as_json`` to ``False``.
                            Default: True.
                            New in version *0.2.6*.
+        * ``server_side_params`` -- Species on which side query parameters
+                           should be rendered into placeholders.
+                           Default: False. Means that parameters are rendered
+                           on driver's side.
+                           New in version *0.2.7*.
     """
 
     available_client_settings = (
@@ -74,7 +79,8 @@ class Client(object):
         'opentelemetry_tracestate',
         'quota_key',
         'input_format_null_as_default',
-        'namedtuple_as_json'
+        'namedtuple_as_json',
+        'server_side_params'
     )
 
     def __init__(self, *args, **kwargs):
@@ -107,6 +113,9 @@ class Client(object):
             ),
             'namedtuple_as_json': self.settings.pop(
                 'namedtuple_as_json', True
+            ),
+            'server_side_params': self.settings.pop(
+                'server_side_params', False
             )
         }
 
@@ -592,12 +601,12 @@ class Client(object):
         self.connection.send_query(query_without_data, query_id=query_id)
         self.connection.send_external_tables(external_tables,
                                              types_check=types_check)
-
         sample_block = self.receive_sample_block()
+
         if sample_block:
             rv = self.send_data(sample_block, data,
                                 types_check=types_check, columnar=columnar)
-            self.receive_end_of_query()
+            self.receive_end_of_insert_query()
             return rv
 
     def receive_sample_block(self):
@@ -651,8 +660,15 @@ class Client(object):
             self.connection.send_data(block)
             inserted_rows += block.num_rows
 
+            # Starting from the specific revision there are profile events
+            # sent by server in response to each inserted block
+            self.receive_profile_events()
+
         # Empty block means end of data.
         self.connection.send_data(block_cls())
+        # If enabled by revision profile events are also sent after empty block
+        self.receive_profile_events()
+
         return inserted_rows
 
     def receive_end_of_query(self):
@@ -663,7 +679,7 @@ class Client(object):
                 break
 
             elif packet.type == ServerPacketTypes.PROGRESS:
-                continue
+                self.last_query.store_progress(packet.progress)
 
             elif packet.type == ServerPacketTypes.EXCEPTION:
                 raise packet.exception
@@ -675,11 +691,64 @@ class Client(object):
                 pass
 
             elif packet.type == ServerPacketTypes.PROFILE_EVENTS:
-                pass
+                self.last_query.store_profile(packet.profile_info)
 
             else:
                 message = self.connection.unexpected_packet_message(
-                    'Exception, EndOfStream or Log', packet.type
+                    'Exception, EndOfStream, Progress, TableColumns, '
+                    'ProfileEvents or Log', packet.type
+                )
+                raise errors.UnexpectedPacketFromServerError(message)
+
+    def receive_end_of_insert_query(self):
+        while True:
+            packet = self.connection.receive_packet()
+
+            if packet.type == ServerPacketTypes.END_OF_STREAM:
+                break
+
+            elif packet.type == ServerPacketTypes.LOG:
+                log_block(packet.block)
+
+            elif packet.type == ServerPacketTypes.PROGRESS:
+                self.last_query.store_progress(packet.progress)
+
+            elif packet.type == ServerPacketTypes.EXCEPTION:
+                raise packet.exception
+
+            else:
+                message = self.connection.unexpected_packet_message(
+                    'EndOfStream, Log, Progress or Exception', packet.type
+                )
+                raise errors.UnexpectedPacketFromServerError(message)
+
+    def receive_profile_events(self):
+        revision = self.connection.server_info.used_revision
+        if (
+            revision <
+            defines.DBMS_MIN_PROTOCOL_VERSION_WITH_PROFILE_EVENTS_IN_INSERT
+        ):
+            return None
+
+        while True:
+            packet = self.connection.receive_packet()
+
+            if packet.type == ServerPacketTypes.PROFILE_EVENTS:
+                self.last_query.store_profile(packet.profile_info)
+                break
+
+            elif packet.type == ServerPacketTypes.PROGRESS:
+                self.last_query.store_progress(packet.progress)
+
+            elif packet.type == ServerPacketTypes.LOG:
+                log_block(packet.block)
+
+            elif packet.type == ServerPacketTypes.EXCEPTION:
+                raise packet.exception
+
+            else:
+                message = self.connection.unexpected_packet_message(
+                    'ProfileEvents, Progress, Log or Exception', packet.type
                 )
                 raise errors.UnexpectedPacketFromServerError(message)
 
@@ -706,6 +775,10 @@ class Client(object):
             # prints: SELECT 1234, 'bar'
             print(substituted_query)
         """
+        # In case of server side templating we don't substitute here.
+        if self.connection.context.client_settings['server_side_params']:
+            return query
+
         if not isinstance(params, dict):
             raise ValueError('Parameters are expected in dict form')
 
@@ -799,7 +872,7 @@ class Client(object):
                 except ValueError:
                     parts = value.split(',')
                     kwargs[name] = (
-                        float(parts[0]), float(parts[1]), int(parts[2])
+                        int(parts[0]), int(parts[1]), int(parts[2])
                     )
             elif name == 'client_revision':
                 kwargs[name] = int(value)

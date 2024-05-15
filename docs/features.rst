@@ -186,6 +186,7 @@ Statistics is sent from ClickHouse server and calculated on client side.
     - total rows;
     - written rows (*new in version 0.1.3*);
     - written bytes (*new in version 0.1.3*);
+    - elapsed nanoseconds on server side (*new in version 0.2.7*);
 
     .. code-block:: python
 
@@ -197,8 +198,10 @@ Statistics is sent from ClickHouse server and calculated on client side.
         80
         >>> client.last_query.progress.total_rows
         10
+        >>> client.last_query.progress.elapsed_ns
+        5328901
 
-* elapsed time:
+* elapsed time calculated on client (driver) side:
 
     .. code-block:: python
 
@@ -576,7 +579,7 @@ You can also specify custom keepalive settings with tuple
 
     .. code-block:: python
 
-        >>> client = Client('localhost', tcp_keepalive=(60.5, 5.1, 2))
+        >>> client = Client('localhost', tcp_keepalive=(60, 5, 2))
 
     .. note::
 
