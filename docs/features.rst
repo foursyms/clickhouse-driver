@@ -91,6 +91,9 @@ An older version is published separately at `PyPI <https://pypi.org/project/clic
 Secure connection
 -----------------
 
+If package ``certifi`` is installed it will be loaded by default (*new in version 0.2.10*).
+There is no need in `ca_certs=certifi.where()`.
+
     .. code-block:: python
 
         >>> from clickhouse_driver import Client
@@ -101,16 +104,17 @@ Secure connection
         ...     'localhost', secure=True,
         ...     ca_certs='/etc/clickhouse-server/server.crt'
         ... )
+        >>> # Using a client certificate with optional password
+        >>> self_signed_client = Client(
+        ...     'localhost', secure=True,
+        ...     ca_certs='/etc/clickhouse-client/ca.crt',
+        ...     certfile='/etc/clickhouse-client/client.crt',
+        ...     keyfile='/etc/clickhouse-client/client.key',
+        ...     keypass='supersecret'
+        ... )
         >>> # Disable verification.
         ... no_verifyed_client = Client(
         ...     'localhost', secure=True, verify=False
-        ... )
-        >>>
-        >>> # Example of secured client with Let's Encrypt certificate.
-        ... import certifi
-        >>>
-        >>> client = Client(
-        ...     'remote-host', secure=True, ca_certs=certifi.where()
         ... )
 
 
