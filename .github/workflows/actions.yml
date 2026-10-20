@@ -1,11 +1,25 @@
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+    tags: ['*']
+  pull_request:
 name: build
+
+concurrency:
+  # One lane per workflow + PR; non-PR pushes fall back to run_id (never cancel each other)
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     runs-on: ubuntu-22.04
+    env:
+      CLICKHOUSE_VERSION: ${{ matrix.clickhouse-version }}
     strategy:
       matrix:
         use-numpy:
+          - 0
+        use-arrow:
           - 0
         python-version:
           - "3.9"
@@ -17,6 +31,7 @@ jobs:
           - "pypy-3.9"
           - "pypy-3.10"
         clickhouse-version:
+          - 25.5.6.14
           - 24.4.1
           - 24.1.8.22
           - 24.1.7.18
@@ -48,8 +63,23 @@ jobs:
           - clickhouse-version: 20.3.20.6
             use-numpy: 1
             python-version: 3.9
+          # Oldest supported server + oldest pyarrow/numpy resolvable
+          # on Python 3.9.
+          - clickhouse-version: 20.3.20.6
+            use-numpy: 1
+            use-arrow: 1
+            python-version: 3.9
+          - clickhouse-version: 25.5.6.14
+            use-numpy: 1
+            use-arrow: 1
+            python-version: "3.12"
+          # PyArrow without numpy/pandas: plain conversion paths only.
+          - clickhouse-version: 25.5.6.14
+            use-numpy: 0
+            use-arrow: 1
+            python-version: "3.13"
 
-    name: ${{ matrix.python-version }} CH=${{ matrix.clickhouse-version }} NUMPY=${{ matrix.use-numpy }}
+    name: ${{ matrix.python-version }} CH=${{ matrix.clickhouse-version }} NUMPY=${{ matrix.use-numpy }} ARROW=${{ matrix.use-arrow }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -70,7 +100,6 @@ jobs:
         run: flake8
       - name: Start ClickHouse server and client containers
         run: |
-          echo "VERSION=${{ matrix.clickhouse-version }}" > tests/.env
           if [[ "21.7" = "`echo -e "21.7\n${{ matrix.clickhouse-version }}" | sort -V | head -n1`" ]]; then echo "ORG=clickhouse"; else echo "ORG=yandex" ; fi  >> tests/.env
           if [[ "21.10" = "`echo -e "21.10\n${{ matrix.clickhouse-version }}" | sort -V | head -n1`" ]]; then echo "TOP_LEVEL=clickhouse"; else echo "TOP_LEVEL=yandex" ; fi  >> tests/.env
           docker compose -f tests/docker-compose.yml up -d
@@ -98,6 +127,7 @@ jobs:
           pip install pytest-timeout
         env:
           USE_NUMPY: ${{ matrix.use-numpy }}
+          USE_ARROW: ${{ matrix.use-arrow }}
       - name: Run tests
         run: coverage run -m pytest --timeout=10 -v
         timeout-minutes: 5
@@ -109,7 +139,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COVERALLS_PARALLEL: true
-          COVERALLS_FLAG_NAME: ${{ matrix.python-version }} CH=${{ matrix.clickhouse-version }} NUMPY=${{ matrix.use-numpy }}
+          COVERALLS_FLAG_NAME: ${{ matrix.python-version }} CH=${{ matrix.clickhouse-version }} NUMPY=${{ matrix.use-numpy }} ARROW=${{ matrix.use-arrow }}
 
   coveralls-finished:
     name: Indicate completion to coveralls.io
@@ -142,12 +172,11 @@ jobs:
 #          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
       - name: Start ClickHouse server and client containers
         run: |
-          echo "VERSION=$VERSION" > tests/.env
-          if [[ "21.7" = "`echo -e "21.7\n$VERSION" | sort -V | head -n1`" ]]; then echo "ORG=clickhouse"; else echo "ORG=yandex" ; fi  >> tests/.env
-          if [[ "21.10" = "`echo -e "21.10\n$VERSION" | sort -V | head -n1`" ]]; then echo "TOP_LEVEL=clickhouse"; else echo "TOP_LEVEL=yandex" ; fi  >> tests/.env
+          if [[ "21.7" = "`echo -e "21.7\n$CLICKHOUSE_VERSION" | sort -V | head -n1`" ]]; then echo "ORG=clickhouse"; else echo "ORG=yandex" ; fi  >> tests/.env
+          if [[ "21.10" = "`echo -e "21.10\n$CLICKHOUSE_VERSION" | sort -V | head -n1`" ]]; then echo "TOP_LEVEL=clickhouse"; else echo "TOP_LEVEL=yandex" ; fi  >> tests/.env
           docker compose -f tests/docker-compose.yml up -d
         env:
-          VERSION: 20.3.7.46
+          CLICKHOUSE_VERSION: 20.3.7.46
       - name: Setup clickhouse-client proxy for docker
         run: |
           # Faking clickhouse-client real communication with container via docker exec.
@@ -209,11 +238,17 @@ jobs:
           draft: true
           tag: Linux
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        name: Store wheels
+        if: ${{ github.ref_type == 'tag' }}
+        with:
+          name: dist-linux
+          path: wheelhouse/*.whl
 
   wheels-macos:
     name: Wheels for OS X
     needs: valgrind
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -248,6 +283,12 @@ jobs:
           draft: true
           tag: OS X
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        name: Store wheels
+        if: ${{ github.ref_type == 'tag' }}
+        with:
+          name: dist-macos
+          path: wheelhouse/*.whl
 
   wheels-windows:
     name: Wheels for Windows
@@ -288,6 +329,12 @@ jobs:
           draft: true
           tag: Windows
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        name: Store wheels
+        if: ${{ github.ref_type == 'tag' }}
+        with:
+          name: dist-windows
+          path: wheelhouse/*.whl
 
   wheels-linux-non-x86:
     name: Wheels for Linux non-x86
@@ -339,3 +386,52 @@ jobs:
           draft: true
           tag: Linux non-x86
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        name: Store wheels
+        if: ${{ github.ref_type == 'tag' }}
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    name: Source distribution
+    needs: valgrind
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Build sdist
+        run: |
+          pip install --upgrade pip build
+          python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        name: Store sdist
+        if: ${{ github.ref_type == 'tag' }}
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: ${{ github.ref_type == 'tag' }}
+    needs:
+      - sdist
+      - wheels-linux
+      - wheels-macos
+      - wheels-windows
+      - wheels-linux-non-x86
+    runs-on: ubuntu-22.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
